@@ -73,6 +73,8 @@ cuda = _nvcc_version()
 
 extensions, skipped = [], {}
 for name, kernel in kernels.items():
+    if kernel.python_only:
+        continue
     if selection and name not in selection:
         skipped[name] = "not selected by PRIME_KERNELS"
         continue

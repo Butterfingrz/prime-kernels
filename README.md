@@ -9,10 +9,11 @@ CUDA kernels for Prime Intellect training stacks, shipped as one wheel, `prime-k
     ├── kernels.toml          # the manifest: one table per kernel
     ├── __init__.py           # registry: is_available / load / status
     ├── _spec.py              # manifest parser (build time + runtime)
-    ├── flash_moe/            # one folder per kernel
+    ├── flash_moe/            # compiled kernel
     │   ├── __init__.py       # Python surface: op wrappers, fake tensors
     │   ├── mxfp8.py
     │   └── csrc/             # the C++/CUDA sources compiled into prime_kernels.flash_moe._C
+    ├── indexed_attention/    # Python-only TileLang indexed GQA forward + backward
     └── rmsnorm/
         ├── __init__.py
         ├── csrc/             # the torch binding
@@ -22,7 +23,8 @@ CUDA kernels for Prime Intellect training stacks, shipped as one wheel, `prime-k
 
 The repo root is the wheel: `setup.py` and `pyproject.toml` sit here, and `prime_kernels/`
 is the package you import. A kernel folder holds both halves of one kernel — its Python
-surface and, under `csrc/`, the sources compiled into `prime_kernels.<name>._C`.
+surface and, for compiled kernels, the sources under `csrc/` compiled into
+`prime_kernels.<name>._C`.
 
 This repo builds and publishes its own prebuilt wheels via
 [`build_kernels.yaml`](.github/workflows/build_kernels.yaml). It is also consumed as a git
@@ -55,9 +57,16 @@ resolves the kernel during model setup so an unusable install fails before train
 It picks `fused_moe_mxfp8` when the run also quantizes the experts to MXFP8 and
 `fused_moe_bf16` otherwise.
 
+`indexed_attention` provides differentiable grouped-query attention over an explicit token
+selection for each query. Its TileLang kernels compute selection scores and radix selection
+as well as attention, and accept different query and KV lengths so the caller can gather KV
+for context parallelism without gathering queries.
+It supports SM80, SM90, SM100, and SM103 (B300), and requires TileLang (validated with
+0.1.12). Install TileLang separately; the registry reports it missing when unavailable.
+
 ## Installing
 
-prime-rl's `uv sync --extra kernels` installs the prebuilt wheels attached to a prime-rl
+prime-rl's `uv sync --extra kernels` installs the prebuilt wheels attached to a prime-kernels
 release, pinned in its root `[tool.uv.sources]`. Building from source is manual and always
 explicit — no `uv sync` compiles CUDA:
 
@@ -68,7 +77,9 @@ uv pip install --no-build-isolation -e .
 The build needs `nvcc` (`CUDA_HOME`) whose CUDA major matches torch's. Kernels whose toolkit
 is unsuitable are skipped with a message rather than failing the build; the registry then
 reports them unavailable. `PRIME_KERNELS=a,b` builds a subset, `PRIME_KERNELS_REQUIRE=1`
-turns a skip into an error (prime-rl's release workflow sets it).
+turns a skip into an error (the release workflow sets it).
+Python-only kernels are packaged without compiling a CUDA extension; their kernels JIT
+compile on the target GPU when called.
 
 ## Adding a kernel
 
@@ -95,6 +106,12 @@ cxx-std = 20
    `torch.library.register_autograd`: a schema carries no backward, so without it autograd
    treats the op as non-differentiable. `flash_moe` is the exception — it is forward only,
    and prime-rl wraps it in its own `autograd.Function`.
+
+For a Python-only kernel, set `python-only = true`, omit `ops` and `sources`, and expose
+the differentiable Python surface from `__init__.py`. Optional import requirements belong
+in the manifest's `requires` list so `is_available()` fails during setup. Python-only ops
+may use `torch.library.custom_op`; register fake and autograd implementations so they remain
+visible to `torch.compile` and training.
 
 Whatever the kernel requires of its inputs — block sizes, alignments, layouts — belongs
 here, not in the caller: `TORCH_CHECK` it in the binding, and export the constants
