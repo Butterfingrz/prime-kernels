@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import importlib.util
 from importlib.machinery import EXTENSION_SUFFIXES
 from pathlib import Path
 from types import ModuleType
@@ -20,6 +21,7 @@ __all__ = [
 ]
 
 _SPECS: dict[str, KernelSpec] = _load_manifest(Path(__file__).parent)
+_LOADED_MODULES: dict[str, ModuleType] = {}
 
 KERNELS: tuple[str, ...] = tuple(_SPECS)
 
@@ -31,7 +33,10 @@ def spec(name: str) -> KernelSpec:
 
 
 def is_built(name: str) -> bool:
-    directory = spec(name).path
+    kernel = spec(name)
+    directory = kernel.path
+    if kernel.python_only:
+        return (directory / "__init__.py").is_file()
     return any((directory / f"_C{suffix}").exists() for suffix in EXTENSION_SUFFIXES)
 
 
@@ -41,6 +46,9 @@ def unavailable_reason(name: str, device: int | None = None) -> str | None:
     kernel = spec(name)
     if not is_built(name):
         return f"{name} was not compiled into this install of prime-kernels"
+    missing = [requirement for requirement in kernel.requires if importlib.util.find_spec(requirement) is None]
+    if missing:
+        return f"{name} requires {', '.join(missing)}, which is not installed"
     if not torch.cuda.is_available():
         return f"{name} requires a CUDA device ({kernel.sm_list}), none is available"
     capability = torch.cuda.get_device_capability(device)
@@ -54,10 +62,16 @@ def is_available(name: str, device: int | None = None) -> bool:
 
 
 def load(name: str, device: int | None = None) -> ModuleType:
+    try:
+        return _LOADED_MODULES[name]
+    except KeyError:
+        pass
     reason = unavailable_reason(name, device)
     if reason is not None:
         raise RuntimeError(reason)
-    return importlib.import_module(spec(name).module)
+    module = importlib.import_module(spec(name).module)
+    _LOADED_MODULES[name] = module
+    return module
 
 
 def status(device: int | None = None) -> dict[str, str]:
